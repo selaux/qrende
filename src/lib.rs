@@ -44,7 +44,7 @@ pub fn adaptive_gaussian_threshold(
 }
 
 const BLACK_INNER_RATIO: f64 = 3.;
-const THRESHOLD: f64 = 0.5;
+const THRESHOLD: f64 = 0.8;
 
 #[derive(Debug)]
 enum ScanState {
@@ -102,10 +102,15 @@ pub fn below_ratio(other_count: u32, my_count: u32, ratio: f64) -> bool {
     calculate_ratio(other_count, my_count) < ratio * (1. - THRESHOLD)
 }
 
-fn advance_state(state: &ScanState, pos: u32, pixel: &Luma<u8>) -> ScanState {
+fn advance_state(state: &ScanState, pos: u32, pixel: &Luma<u8>) -> (u32, ScanState) {
     let is_white = is_white(pixel);
 
-    match state {
+    let mut next_pos = pos + 1;
+    let mut reset_to_start = |start| {
+        next_pos = start + 1;
+        ScanState::InBlack
+    };
+    let new_state = match state {
         ScanState::Found { .. } => {
             if is_white {
                 ScanState::InWhite
@@ -161,16 +166,13 @@ fn advance_state(state: &ScanState, pos: u32, pixel: &Luma<u8>) -> ScanState {
             let white_below_ratio = below_ratio(*black_border1_count, new_count, 1.);
 
             match (is_white, white_exceeds_ratio, white_below_ratio) {
-                (true, true, _) => ScanState::InWhite,
+                (true, true, _) => reset_to_start(*start),
                 (true, false, _) => ScanState::WhiteInner1 {
                     start: *start,
                     black_border1_count: *black_border1_count,
                     white_inner1_count: new_count,
                 },
-                (false, _, true) => ScanState::BlackBorder1 {
-                    start: pos,
-                    black_border1_count: 1,
-                },
+                (false, _, true) => reset_to_start(*start),
                 (false, _, false) => ScanState::BlackInner {
                     start: *start,
                     black_border1_count: *black_border1_count,
@@ -192,17 +194,14 @@ fn advance_state(state: &ScanState, pos: u32, pixel: &Luma<u8>) -> ScanState {
                 below_ratio(*white_inner1_count, *black_inner_count, BLACK_INNER_RATIO);
 
             match (is_white, black_exceeds_ratio, black_below_ratio) {
-                (false, true, _) => ScanState::BlackBorder1 {
-                    start: pos - black_inner_count,
-                    black_border1_count: *black_inner_count,
-                },
+                (false, true, _) => reset_to_start(*start),
                 (false, false, _) => ScanState::BlackInner {
                     start: *start,
                     black_border1_count: *black_border1_count,
                     white_inner1_count: *white_inner1_count,
                     black_inner_count: new_count,
                 },
-                (true, _, true) => ScanState::InWhite,
+                (true, _, true) => reset_to_start(*start),
                 (true, _, false) => ScanState::WhiteInner2 {
                     start: *start,
                     black_border1_count: *black_border1_count,
@@ -229,7 +228,7 @@ fn advance_state(state: &ScanState, pos: u32, pixel: &Luma<u8>) -> ScanState {
             );
 
             match (is_white, white_exceeds_ratio, white_below_ratio) {
-                (true, true, _) => ScanState::InWhite,
+                (true, true, _) => reset_to_start(*start),
                 (true, false, _) => ScanState::WhiteInner2 {
                     start: *start,
                     black_border1_count: *black_border1_count,
@@ -237,10 +236,7 @@ fn advance_state(state: &ScanState, pos: u32, pixel: &Luma<u8>) -> ScanState {
                     black_inner_count: *black_inner_count,
                     white_inner2_count: new_count,
                 },
-                (false, _, true) => ScanState::BlackBorder1 {
-                    start: pos,
-                    black_border1_count: 1,
-                },
+                (false, _, true) => reset_to_start(*start),
                 (false, _, false) => ScanState::BlackBorder2 {
                     start: *start,
                     black_border1_count: *black_border1_count,
@@ -264,10 +260,7 @@ fn advance_state(state: &ScanState, pos: u32, pixel: &Luma<u8>) -> ScanState {
             let black_below_ratio = below_ratio(*white_inner2_count, *black_border2_count, 1.);
 
             match (is_white, black_exceeds_ratio, black_below_ratio) {
-                (false, true, _) => ScanState::BlackBorder1 {
-                    start: pos - black_inner_count,
-                    black_border1_count: *black_inner_count,
-                },
+                (false, true, _) => reset_to_start(*start),
                 (false, false, _) => ScanState::BlackBorder2 {
                     start: *start,
                     black_border1_count: *black_border1_count,
@@ -276,14 +269,16 @@ fn advance_state(state: &ScanState, pos: u32, pixel: &Luma<u8>) -> ScanState {
                     white_inner2_count: *white_inner2_count,
                     black_border2_count: new_count,
                 },
-                (true, _, true) => ScanState::InWhite,
+                (true, _, true) => reset_to_start(*start),
                 (true, _, false) => ScanState::Found {
                     start: *start,
                     end: pos - 1,
                 },
             }
         }
-    }
+    };
+
+    (next_pos, new_state)
 }
 
 pub fn detect_position_markers_vertical(image: &Image<Luma<u8>>) -> Vec<(u32, u32)> {
@@ -294,8 +289,12 @@ pub fn detect_position_markers_vertical(image: &Image<Luma<u8>>) -> Vec<(u32, u3
         } else {
             ScanState::InBlack
         };
-        for y in 1..image.height() {
-            state = advance_state(&state, y, image.get_pixel(x, y));
+        let mut y: u32 = 1;
+
+        while y < image.height() {
+            let (new_y, new_state) = advance_state(&state, y, image.get_pixel(x, y));
+            y = new_y;
+            state = new_state;
             if let ScanState::Found { start, end } = state {
                 let middle = (start + end) / 2;
                 found.push((x, middle));
@@ -308,8 +307,12 @@ pub fn detect_position_markers_vertical(image: &Image<Luma<u8>>) -> Vec<(u32, u3
         } else {
             ScanState::InBlack
         };
-        for x in 1..image.width() {
-            state = advance_state(&state, x, image.get_pixel(x, y));
+        let mut x: u32 = 1;
+
+        while x < image.height() {
+            let (new_x, new_state) = advance_state(&state, x, image.get_pixel(x, y));
+            x = new_x;
+            state = new_state;
             if let ScanState::Found { start, end } = state {
                 let middle = (start + end) / 2;
                 found.push((middle, y));
