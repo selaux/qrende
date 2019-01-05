@@ -43,8 +43,20 @@ pub fn adaptive_gaussian_threshold(
     })
 }
 
-const BLACK_INNER_RATIO: f64 = 3.;
-const THRESHOLD: f64 = 0.8;
+const EXPECTED_RATIOS: [f64; 5] = [1., 1., 3., 1., 1.];
+const SYMMETRY_THRESHOLD: f64 = 0.4;
+const VARIANCE_THRESHOLD: f64 = 0.2;
+
+#[derive(Debug)]
+struct PositionMarkerHint {
+    start: u32,
+    end: u32,
+    black_border1_count: u32,
+    white_inner1_count: u32,
+    black_inner_count: u32,
+    white_inner2_count: u32,
+    black_border2_count: u32,
+}
 
 #[derive(Debug)]
 enum ScanState {
@@ -80,36 +92,59 @@ enum ScanState {
         white_inner2_count: u32,
         black_border2_count: u32,
     },
-    Found {
-        start: u32,
-        end: u32,
-    },
+    Found(PositionMarkerHint),
 }
 
 pub fn is_white(pixel: Luma<u8>) -> bool {
     pixel[0] == 255
 }
 
-pub fn calculate_ratio(other_count: u32, my_count: u32) -> f64 {
-    f64::from(my_count) / f64::from(other_count)
+fn is_symmetric(scan_result: &PositionMarkerHint) -> bool {
+    let one = [
+        scan_result.black_border1_count,
+        scan_result.white_inner1_count,
+    ];
+    let two = [
+        scan_result.black_border2_count,
+        scan_result.white_inner2_count,
+    ];
+    let total = f64::from(one.iter().chain(two.iter()).sum::<u32>());
+    let sum: f64 = one
+        .iter()
+        .zip(two.iter())
+        .map(|(got, expected)| f64::abs(f64::from(*got) - f64::from(*expected)))
+        .map(|s| s / total)
+        .sum::<f64>();
+
+    sum < SYMMETRY_THRESHOLD
 }
 
-pub fn exceeds_ratio(other_count: u32, my_count: u32, ratio: f64) -> bool {
-    calculate_ratio(other_count, my_count) > ratio * (1. + THRESHOLD)
+fn ratios_match(scan_result: &PositionMarkerHint) -> bool {
+    let expected_total: f64 = EXPECTED_RATIOS.iter().sum();
+    let expected = EXPECTED_RATIOS.iter().map(|f| f / expected_total);
+    let result = [
+        scan_result.black_border1_count,
+        scan_result.white_inner1_count,
+        scan_result.black_inner_count,
+        scan_result.white_inner2_count,
+        scan_result.black_border2_count,
+    ];
+    let total = f64::from(result.iter().sum::<u32>());
+    let got = result.iter().map(|v| f64::from(*v) / total);
+    let sum: f64 = got
+        .zip(expected)
+        .map(|(got, expected)| f64::abs(got - expected))
+        .sum();
+
+    sum < VARIANCE_THRESHOLD
 }
 
-pub fn below_ratio(other_count: u32, my_count: u32, ratio: f64) -> bool {
-    calculate_ratio(other_count, my_count) < ratio * (1. - THRESHOLD)
+fn is_valid_match(scan_result: &PositionMarkerHint) -> bool {
+    is_symmetric(scan_result) && ratios_match(scan_result)
 }
 
-fn advance_state(state: &ScanState, pos: u32, pixel: Luma<u8>) -> (u32, ScanState) {
+fn advance_state(state: &ScanState, pos: u32, next_pos: u32, pixel: Luma<u8>) -> (u32, ScanState) {
     let is_white = is_white(pixel);
-
-    let mut next_pos = pos + 1;
-    let mut reset_to_start = |start| {
-        next_pos = start + 1;
-        ScanState::InBlack
-    };
     let new_state = match state {
         ScanState::Found { .. } => {
             if is_white {
@@ -157,28 +192,19 @@ fn advance_state(state: &ScanState, pos: u32, pixel: Luma<u8>) -> (u32, ScanStat
             black_border1_count,
             white_inner1_count,
         } => {
-            let new_count = if is_white {
-                white_inner1_count + 1
-            } else {
-                *white_inner1_count
-            };
-            let white_exceeds_ratio = exceeds_ratio(*black_border1_count, new_count, 1.);
-            let white_below_ratio = below_ratio(*black_border1_count, new_count, 1.);
-
-            match (is_white, white_exceeds_ratio, white_below_ratio) {
-                (true, true, _) => reset_to_start(*start),
-                (true, false, _) => ScanState::WhiteInner1 {
+            if is_white {
+                ScanState::WhiteInner1 {
                     start: *start,
                     black_border1_count: *black_border1_count,
-                    white_inner1_count: new_count,
-                },
-                (false, _, true) => reset_to_start(*start),
-                (false, _, false) => ScanState::BlackInner {
+                    white_inner1_count: white_inner1_count + 1,
+                }
+            } else {
+                ScanState::BlackInner {
                     start: *start,
                     black_border1_count: *black_border1_count,
                     white_inner1_count: *white_inner1_count,
                     black_inner_count: 1,
-                },
+                }
             }
         }
         ScanState::BlackInner {
@@ -187,28 +213,21 @@ fn advance_state(state: &ScanState, pos: u32, pixel: Luma<u8>) -> (u32, ScanStat
             white_inner1_count,
             black_inner_count,
         } => {
-            let new_count = black_inner_count + 1;
-            let black_exceeds_ratio =
-                exceeds_ratio(*white_inner1_count, new_count, BLACK_INNER_RATIO);
-            let black_below_ratio =
-                below_ratio(*white_inner1_count, *black_inner_count, BLACK_INNER_RATIO);
-
-            match (is_white, black_exceeds_ratio, black_below_ratio) {
-                (false, true, _) => reset_to_start(*start),
-                (false, false, _) => ScanState::BlackInner {
-                    start: *start,
-                    black_border1_count: *black_border1_count,
-                    white_inner1_count: *white_inner1_count,
-                    black_inner_count: new_count,
-                },
-                (true, _, true) => reset_to_start(*start),
-                (true, _, false) => ScanState::WhiteInner2 {
+            if is_white {
+                ScanState::WhiteInner2 {
                     start: *start,
                     black_border1_count: *black_border1_count,
                     white_inner1_count: *white_inner1_count,
                     black_inner_count: *black_inner_count,
                     white_inner2_count: 1,
-                },
+                }
+            } else {
+                ScanState::BlackInner {
+                    start: *start,
+                    black_border1_count: *black_border1_count,
+                    white_inner1_count: *white_inner1_count,
+                    black_inner_count: black_inner_count + 1,
+                }
             }
         }
         ScanState::WhiteInner2 {
@@ -218,33 +237,23 @@ fn advance_state(state: &ScanState, pos: u32, pixel: Luma<u8>) -> (u32, ScanStat
             black_inner_count,
             white_inner2_count,
         } => {
-            let new_count = white_inner2_count + 1;
-            let white_exceeds_ratio =
-                exceeds_ratio(*black_inner_count, new_count, 1. / BLACK_INNER_RATIO);
-            let white_below_ratio = below_ratio(
-                *black_inner_count,
-                *black_inner_count,
-                1. / BLACK_INNER_RATIO,
-            );
-
-            match (is_white, white_exceeds_ratio, white_below_ratio) {
-                (true, true, _) => reset_to_start(*start),
-                (true, false, _) => ScanState::WhiteInner2 {
+            if is_white {
+                ScanState::WhiteInner2 {
                     start: *start,
                     black_border1_count: *black_border1_count,
                     white_inner1_count: *white_inner1_count,
                     black_inner_count: *black_inner_count,
-                    white_inner2_count: new_count,
-                },
-                (false, _, true) => reset_to_start(*start),
-                (false, _, false) => ScanState::BlackBorder2 {
+                    white_inner2_count: white_inner2_count + 1,
+                }
+            } else {
+                ScanState::BlackBorder2 {
                     start: *start,
                     black_border1_count: *black_border1_count,
                     white_inner1_count: *white_inner1_count,
                     black_inner_count: *black_inner_count,
                     white_inner2_count: *white_inner2_count,
                     black_border2_count: 1,
-                },
+                }
             }
         }
         ScanState::BlackBorder2 {
@@ -255,34 +264,43 @@ fn advance_state(state: &ScanState, pos: u32, pixel: Luma<u8>) -> (u32, ScanStat
             white_inner2_count,
             black_border2_count,
         } => {
-            let new_count = black_border2_count + 1;
-            let black_exceeds_ratio = exceeds_ratio(*white_inner2_count, new_count, 1.);
-            let black_below_ratio = below_ratio(*white_inner2_count, *black_border2_count, 1.);
-
-            match (is_white, black_exceeds_ratio, black_below_ratio) {
-                (false, true, _) => reset_to_start(*start),
-                (false, false, _) => ScanState::BlackBorder2 {
+            if is_white {
+                ScanState::Found(PositionMarkerHint {
+                    start: *start,
+                    end: pos - 1,
+                    black_border1_count: *black_border1_count,
+                    white_inner1_count: *white_inner1_count,
+                    black_inner_count: *black_inner_count,
+                    white_inner2_count: *white_inner2_count,
+                    black_border2_count: *black_border2_count,
+                })
+            } else {
+                ScanState::BlackBorder2 {
                     start: *start,
                     black_border1_count: *black_border1_count,
                     white_inner1_count: *white_inner1_count,
                     black_inner_count: *black_inner_count,
                     white_inner2_count: *white_inner2_count,
-                    black_border2_count: new_count,
-                },
-                (true, _, true) => reset_to_start(*start),
-                (true, _, false) => ScanState::Found {
-                    start: *start,
-                    end: pos - 1,
-                },
+                    black_border2_count: black_border2_count + 1,
+                }
             }
         }
     };
 
-    (next_pos, new_state)
+    if let ScanState::Found(scan_result) = &new_state {
+        if is_valid_match(scan_result) {
+            (next_pos, new_state)
+        } else {
+            (scan_result.start, ScanState::InBlack)
+        }
+    } else {
+        (next_pos, new_state)
+    }
 }
 
-pub fn detect_position_markers_vertical(image: &Image<Luma<u8>>) -> Vec<(u32, u32)> {
+pub fn detect_position_marker_hints(image: &Image<Luma<u8>>) -> Vec<(u32, u32)> {
     let mut found: Vec<(u32, u32)> = vec![];
+
     for x in 0..image.width() {
         let mut state = if is_white(*image.get_pixel(x, 0)) {
             ScanState::InWhite
@@ -292,15 +310,16 @@ pub fn detect_position_markers_vertical(image: &Image<Luma<u8>>) -> Vec<(u32, u3
         let mut y: u32 = 1;
 
         while y < image.height() {
-            let (new_y, new_state) = advance_state(&state, y, *image.get_pixel(x, y));
+            let (new_y, new_state) = advance_state(&state, y, y + 1, *image.get_pixel(x, y));
             y = new_y;
             state = new_state;
-            if let ScanState::Found { start, end } = state {
-                let middle = (start + end) / 2;
+            if let ScanState::Found(scan_result) = &state {
+                let middle = (scan_result.start + scan_result.end) / 2;
                 found.push((x, middle));
             }
         }
     }
+
     for y in 0..image.height() {
         let mut state = if is_white(*image.get_pixel(0, y)) {
             ScanState::InWhite
@@ -309,12 +328,12 @@ pub fn detect_position_markers_vertical(image: &Image<Luma<u8>>) -> Vec<(u32, u3
         };
         let mut x: u32 = 1;
 
-        while x < image.height() {
-            let (new_x, new_state) = advance_state(&state, x, *image.get_pixel(x, y));
+        while x < image.width() {
+            let (new_x, new_state) = advance_state(&state, x, x + 1, *image.get_pixel(x, y));
             x = new_x;
             state = new_state;
-            if let ScanState::Found { start, end } = state {
-                let middle = (start + end) / 2;
+            if let ScanState::Found(scan_result) = &state {
+                let middle = (scan_result.start + scan_result.end) / 2;
                 found.push((middle, y));
             }
         }
@@ -350,7 +369,7 @@ mod tests {
             .collect();
             let grayscale = image::imageops::colorops::grayscale(&img);
             let thresholded = crate::adaptive_gaussian_threshold(&grayscale, 20., 0);
-            let found = crate::detect_position_markers_vertical(&thresholded);
+            let found = crate::detect_position_marker_hints(&thresholded);
 
             let mut image = DynamicImage::ImageLuma8(thresholded).to_rgb();
             for (x, y) in found {
