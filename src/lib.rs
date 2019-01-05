@@ -1,8 +1,10 @@
+extern crate dbscan;
 extern crate image;
 extern crate imageproc;
 
 use image::Luma;
 use imageproc::definitions::Image;
+use std::collections::HashMap;
 
 pub fn threshold(image: &Image<Luma<u8>>, threshold: u8) -> Image<Luma<u8>> {
     imageproc::map::map_colors(image, |color| {
@@ -48,7 +50,7 @@ const SYMMETRY_THRESHOLD: f64 = 0.4;
 const VARIANCE_THRESHOLD: f64 = 0.2;
 
 #[derive(Debug)]
-struct PositionMarkerHint {
+struct ScanResult {
     start: u32,
     end: u32,
     black_border1_count: u32,
@@ -92,14 +94,14 @@ enum ScanState {
         white_inner2_count: u32,
         black_border2_count: u32,
     },
-    Found(PositionMarkerHint),
+    Found(ScanResult),
 }
 
 pub fn is_white(pixel: Luma<u8>) -> bool {
     pixel[0] == 255
 }
 
-fn is_symmetric(scan_result: &PositionMarkerHint) -> bool {
+fn is_symmetric(scan_result: &ScanResult) -> bool {
     let one = [
         scan_result.black_border1_count,
         scan_result.white_inner1_count,
@@ -119,7 +121,7 @@ fn is_symmetric(scan_result: &PositionMarkerHint) -> bool {
     sum < SYMMETRY_THRESHOLD
 }
 
-fn ratios_match(scan_result: &PositionMarkerHint) -> bool {
+fn ratios_match(scan_result: &ScanResult) -> bool {
     let expected_total: f64 = EXPECTED_RATIOS.iter().sum();
     let expected = EXPECTED_RATIOS.iter().map(|f| f / expected_total);
     let result = [
@@ -139,7 +141,7 @@ fn ratios_match(scan_result: &PositionMarkerHint) -> bool {
     sum < VARIANCE_THRESHOLD
 }
 
-fn is_valid_match(scan_result: &PositionMarkerHint) -> bool {
+fn is_valid_match(scan_result: &ScanResult) -> bool {
     is_symmetric(scan_result) && ratios_match(scan_result)
 }
 
@@ -265,7 +267,7 @@ fn advance_state(state: &ScanState, pos: u32, next_pos: u32, pixel: Luma<u8>) ->
             black_border2_count,
         } => {
             if is_white {
-                ScanState::Found(PositionMarkerHint {
+                ScanState::Found(ScanResult {
                     start: *start,
                     end: pos - 1,
                     black_border1_count: *black_border1_count,
@@ -298,8 +300,14 @@ fn advance_state(state: &ScanState, pos: u32, next_pos: u32, pixel: Luma<u8>) ->
     }
 }
 
-pub fn detect_position_marker_hints(image: &Image<Luma<u8>>) -> Vec<(u32, u32)> {
-    let mut found: Vec<(u32, u32)> = vec![];
+#[derive(Debug, Clone)]
+pub struct PositionMarkerHint {
+    center: (f64, f64),
+    size: f64,
+}
+
+pub fn detect_position_marker_hints(image: &Image<Luma<u8>>) -> Vec<PositionMarkerHint> {
+    let mut found: Vec<PositionMarkerHint> = vec![];
 
     for x in 0..image.width() {
         let mut state = if is_white(*image.get_pixel(x, 0)) {
@@ -315,7 +323,10 @@ pub fn detect_position_marker_hints(image: &Image<Luma<u8>>) -> Vec<(u32, u32)> 
             state = new_state;
             if let ScanState::Found(scan_result) = &state {
                 let middle = (scan_result.start + scan_result.end) / 2;
-                found.push((x, middle));
+                found.push(PositionMarkerHint {
+                    center: (f64::from(x), f64::from(middle)),
+                    size: f64::from(scan_result.end - scan_result.start),
+                });
             }
         }
     }
@@ -334,11 +345,59 @@ pub fn detect_position_marker_hints(image: &Image<Luma<u8>>) -> Vec<(u32, u32)> 
             state = new_state;
             if let ScanState::Found(scan_result) = &state {
                 let middle = (scan_result.start + scan_result.end) / 2;
-                found.push((middle, y));
+                found.push(PositionMarkerHint {
+                    center: (f64::from(middle), f64::from(y)),
+                    size: f64::from(scan_result.end - scan_result.start),
+                });
             }
         }
     }
     found
+}
+
+#[derive(Debug, Clone)]
+pub struct PositionMarker {
+    center: (f64, f64),
+    size: f64,
+}
+
+pub fn cluster_position_marker_hints(hints: &[PositionMarkerHint]) -> Vec<PositionMarker> {
+    let centers: Vec<_> = hints.iter().map(|h| vec![h.center.0, h.center.1]).collect();
+    let classifications = dbscan::cluster(5., 10, &centers);
+    let mut clusters: HashMap<usize, Vec<&PositionMarkerHint>> = HashMap::new();
+
+    for (index, c) in classifications.iter().enumerate() {
+        let hint = &hints[index];
+        match c {
+            dbscan::Classification::Noise => {}
+            dbscan::Classification::Core(cluster) | dbscan::Classification::Edge(cluster) => {
+                clusters
+                    .entry(*cluster)
+                    .and_modify(|v| v.push(hint))
+                    .or_insert_with(|| vec![hint]);
+            }
+        }
+    }
+
+    let markers: Vec<_> = clusters
+        .values()
+        .map(|hints| {
+            let number_of_hints = hints.len();
+            let mean_size =
+                hints.iter().map(|hint| hint.size).sum::<f64>() / number_of_hints as f64;
+            let mean_center_x =
+                hints.iter().map(|hint| hint.center.0).sum::<f64>() / number_of_hints as f64;
+            let mean_center_y =
+                hints.iter().map(|hint| hint.center.1).sum::<f64>() / number_of_hints as f64;
+
+            PositionMarker {
+                center: (mean_center_x, mean_center_y),
+                size: mean_size,
+            }
+        })
+        .collect();
+
+    markers
 }
 
 #[cfg(test)]
@@ -369,14 +428,24 @@ mod tests {
             .collect();
             let grayscale = image::imageops::colorops::grayscale(&img);
             let thresholded = crate::adaptive_gaussian_threshold(&grayscale, 20., 0);
-            let found = crate::detect_position_marker_hints(&thresholded);
+            let hints = crate::detect_position_marker_hints(&thresholded);
+            let markers = crate::cluster_position_marker_hints(&hints);
 
             let mut image = DynamicImage::ImageLuma8(thresholded).to_rgb();
-            for (x, y) in found {
-                let pixel = image.get_pixel_mut(x, y);
+            for hint in hints {
+                let pixel = image.get_pixel_mut(hint.center.0 as u32, hint.center.1 as u32);
                 pixel[0] = 255;
                 pixel[1] = 0;
                 pixel[2] = 0;
+            }
+            for marker in markers {
+                let rect = imageproc::rect::Rect::at(
+                    (marker.center.0 - marker.size / 2.) as i32,
+                    (marker.center.1 - marker.size / 2.) as i32,
+                )
+                .of_size(marker.size as u32, marker.size as u32);
+
+                imageproc::drawing::draw_hollow_rect_mut(&mut image, rect, image::Rgb([0, 255, 0]));
             }
 
             image.save(&output_path).unwrap();
