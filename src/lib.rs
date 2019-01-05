@@ -86,7 +86,7 @@ enum ScanState {
     },
 }
 
-pub fn is_white(pixel: &Luma<u8>) -> bool {
+pub fn is_white(pixel: Luma<u8>) -> bool {
     pixel[0] == 255
 }
 
@@ -102,7 +102,7 @@ pub fn below_ratio(other_count: u32, my_count: u32, ratio: f64) -> bool {
     calculate_ratio(other_count, my_count) < ratio * (1. - THRESHOLD)
 }
 
-fn advance_state(state: &ScanState, pos: u32, pixel: &Luma<u8>) -> (u32, ScanState) {
+fn advance_state(state: &ScanState, pos: u32, pixel: Luma<u8>) -> (u32, ScanState) {
     let is_white = is_white(pixel);
 
     let mut next_pos = pos + 1;
@@ -284,7 +284,7 @@ fn advance_state(state: &ScanState, pos: u32, pixel: &Luma<u8>) -> (u32, ScanSta
 pub fn detect_position_markers_vertical(image: &Image<Luma<u8>>) -> Vec<(u32, u32)> {
     let mut found: Vec<(u32, u32)> = vec![];
     for x in 0..image.width() {
-        let mut state = if is_white(image.get_pixel(x, 0)) {
+        let mut state = if is_white(*image.get_pixel(x, 0)) {
             ScanState::InWhite
         } else {
             ScanState::InBlack
@@ -292,7 +292,7 @@ pub fn detect_position_markers_vertical(image: &Image<Luma<u8>>) -> Vec<(u32, u3
         let mut y: u32 = 1;
 
         while y < image.height() {
-            let (new_y, new_state) = advance_state(&state, y, image.get_pixel(x, y));
+            let (new_y, new_state) = advance_state(&state, y, *image.get_pixel(x, y));
             y = new_y;
             state = new_state;
             if let ScanState::Found { start, end } = state {
@@ -302,7 +302,7 @@ pub fn detect_position_markers_vertical(image: &Image<Luma<u8>>) -> Vec<(u32, u3
         }
     }
     for y in 0..image.height() {
-        let mut state = if is_white(image.get_pixel(0, y)) {
+        let mut state = if is_white(*image.get_pixel(0, y)) {
             ScanState::InWhite
         } else {
             ScanState::InBlack
@@ -310,7 +310,7 @@ pub fn detect_position_markers_vertical(image: &Image<Luma<u8>>) -> Vec<(u32, u3
         let mut x: u32 = 1;
 
         while x < image.height() {
-            let (new_x, new_state) = advance_state(&state, x, image.get_pixel(x, y));
+            let (new_x, new_state) = advance_state(&state, x, *image.get_pixel(x, y));
             x = new_x;
             state = new_state;
             if let ScanState::Found { start, end } = state {
@@ -321,12 +321,6 @@ pub fn detect_position_markers_vertical(image: &Image<Luma<u8>>) -> Vec<(u32, u3
     }
     found
 }
-
-#[derive(Debug)]
-pub struct Point(pub u32, pub u32);
-
-#[derive(Debug)]
-pub struct Polygon(pub Vec<Point>);
 
 #[cfg(test)]
 mod tests {
