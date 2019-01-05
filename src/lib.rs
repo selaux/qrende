@@ -310,12 +310,8 @@ pub fn detect_position_marker_hints(image: &Image<Luma<u8>>) -> Vec<PositionMark
     let mut found: Vec<PositionMarkerHint> = vec![];
 
     for x in 0..image.width() {
-        let mut state = if is_white(*image.get_pixel(x, 0)) {
-            ScanState::InWhite
-        } else {
-            ScanState::InBlack
-        };
-        let mut y: u32 = 1;
+        let mut state = ScanState::InWhite;
+        let mut y: u32 = 0;
 
         while y < image.height() {
             let (new_y, new_state) = advance_state(&state, y, y + 1, *image.get_pixel(x, y));
@@ -332,12 +328,8 @@ pub fn detect_position_marker_hints(image: &Image<Luma<u8>>) -> Vec<PositionMark
     }
 
     for y in 0..image.height() {
-        let mut state = if is_white(*image.get_pixel(0, y)) {
-            ScanState::InWhite
-        } else {
-            ScanState::InBlack
-        };
-        let mut x: u32 = 1;
+        let mut state = ScanState::InWhite;
+        let mut x: u32 = 0;
 
         while x < image.width() {
             let (new_x, new_state) = advance_state(&state, x, x + 1, *image.get_pixel(x, y));
@@ -431,7 +423,7 @@ mod tests {
             let hints = crate::detect_position_marker_hints(&thresholded);
             let markers = crate::cluster_position_marker_hints(&hints);
 
-            let mut image = DynamicImage::ImageLuma8(thresholded).to_rgb();
+            let mut image = DynamicImage::ImageLuma8(grayscale).to_rgb();
             for hint in hints {
                 let pixel = image.get_pixel_mut(hint.center.0 as u32, hint.center.1 as u32);
                 pixel[0] = 255;
