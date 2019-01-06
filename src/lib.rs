@@ -47,7 +47,7 @@ pub fn adaptive_gaussian_threshold(
 
 const EXPECTED_RATIOS: [f64; 5] = [1., 1., 3., 1., 1.];
 const SYMMETRY_THRESHOLD: f64 = 0.4;
-const VARIANCE_THRESHOLD: f64 = 0.2;
+const VARIANCE_THRESHOLD: f64 = 0.5;
 
 #[derive(Debug)]
 struct ScanResult {
@@ -58,6 +58,25 @@ struct ScanResult {
     black_inner_count: u32,
     white_inner2_count: u32,
     black_border2_count: u32,
+}
+
+impl ScanResult {
+    fn middle(&self) -> f64 {
+        [
+            f64::from(self.start),
+            f64::from(self.black_border1_count),
+            f64::from(self.white_inner1_count),
+            f64::from(self.black_inner_count) / 2.,
+        ]
+        .iter()
+        .sum()
+    }
+
+    fn size(&self) -> f64 {
+        let total_ratios: f64 = EXPECTED_RATIOS.iter().sum();
+        let inner_ratio = EXPECTED_RATIOS[2];
+        (total_ratios * f64::from(self.black_inner_count)) / inner_ratio
+    }
 }
 
 #[derive(Debug)]
@@ -122,23 +141,25 @@ fn is_symmetric(scan_result: &ScanResult) -> bool {
 }
 
 fn ratios_match(scan_result: &ScanResult) -> bool {
-    let expected_total: f64 = EXPECTED_RATIOS.iter().sum();
-    let expected = EXPECTED_RATIOS.iter().map(|f| f / expected_total);
-    let result = [
+    let scan_result_widths = [
         scan_result.black_border1_count,
         scan_result.white_inner1_count,
         scan_result.black_inner_count,
         scan_result.white_inner2_count,
         scan_result.black_border2_count,
     ];
-    let total = f64::from(result.iter().sum::<u32>());
-    let got = result.iter().map(|v| f64::from(*v) / total);
-    let sum: f64 = got
-        .zip(expected)
-        .map(|(got, expected)| f64::abs(got - expected))
-        .sum();
+    let ratios_total: f64 = EXPECTED_RATIOS.iter().sum();
+    let scan_result_total = f64::from(scan_result_widths.iter().sum::<u32>());
 
-    sum < VARIANCE_THRESHOLD
+    let module_size = scan_result_total / ratios_total;
+    let max_variance = VARIANCE_THRESHOLD * module_size;
+
+    scan_result_widths
+        .iter()
+        .zip(EXPECTED_RATIOS.iter())
+        .all(|(width, ratio)| {
+            f64::abs(ratio * module_size - f64::from(*width)) < ratio * max_variance
+        })
 }
 
 fn is_valid_match(scan_result: &ScanResult) -> bool {
@@ -269,7 +290,7 @@ fn advance_state(state: &ScanState, pos: u32, next_pos: u32, pixel: Luma<u8>) ->
             if is_white {
                 ScanState::Found(ScanResult {
                     start: *start,
-                    end: pos - 1,
+                    end: pos,
                     black_border1_count: *black_border1_count,
                     white_inner1_count: *white_inner1_count,
                     black_inner_count: *black_inner_count,
@@ -318,10 +339,9 @@ pub fn detect_position_marker_hints(image: &Image<Luma<u8>>) -> Vec<PositionMark
             y = new_y;
             state = new_state;
             if let ScanState::Found(scan_result) = &state {
-                let middle = (scan_result.start + scan_result.end) / 2;
                 found.push(PositionMarkerHint {
-                    center: (f64::from(x), f64::from(middle)),
-                    size: f64::from(scan_result.end - scan_result.start),
+                    center: (f64::from(x), scan_result.middle()),
+                    size: scan_result.size(),
                 });
             }
         }
@@ -336,10 +356,9 @@ pub fn detect_position_marker_hints(image: &Image<Luma<u8>>) -> Vec<PositionMark
             x = new_x;
             state = new_state;
             if let ScanState::Found(scan_result) = &state {
-                let middle = (scan_result.start + scan_result.end) / 2;
                 found.push(PositionMarkerHint {
-                    center: (f64::from(middle), f64::from(y)),
-                    size: f64::from(scan_result.end - scan_result.start),
+                    center: (scan_result.middle(), f64::from(y)),
+                    size: scan_result.size(),
                 });
             }
         }
@@ -355,7 +374,7 @@ pub struct PositionMarker {
 
 pub fn cluster_position_marker_hints(hints: &[PositionMarkerHint]) -> Vec<PositionMarker> {
     let centers: Vec<_> = hints.iter().map(|h| vec![h.center.0, h.center.1]).collect();
-    let classifications = dbscan::cluster(5., 10, &centers);
+    let classifications = dbscan::cluster(4., 9, &centers);
     let mut clusters: HashMap<usize, Vec<&PositionMarkerHint>> = HashMap::new();
 
     for (index, c) in classifications.iter().enumerate() {
@@ -401,23 +420,45 @@ mod tests {
 
     use image::DynamicImage;
 
+    fn all_blackbox_files() -> Vec<(String, String, String)> {
+        let blackbox_tests = env::var("BLACKBOX_TESTS").unwrap();
+
+        blackbox_tests
+            .split(';')
+            .flat_map(|index_and_test_dir| {
+                let mut index_and_test_dir_iter = index_and_test_dir.split(':');
+                let index = String::from(index_and_test_dir_iter.next().unwrap());
+                let dir = index_and_test_dir_iter.next().unwrap();
+                let files: Vec<_> = fs::read_dir(&dir)
+                    .map_err(|e| format!("Could not read: {:?} {:?}", dir, e))
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .filter(|path| path.extension() == Some(&OsString::from("png")))
+                    .map(|path| {
+                        (
+                            index.clone(),
+                            String::from(path.parent().unwrap().to_string_lossy()),
+                            String::from(path.file_name().unwrap().to_string_lossy()),
+                        )
+                    })
+                    .collect();
+                files
+            })
+            .collect()
+    }
+
     #[test]
     fn it_should_detect_all_barcodes() {
-        let blackbox_tests = PathBuf::from(env::var("BLACKBOX_TESTS").unwrap());
-        let files: Vec<_> = fs::read_dir(&blackbox_tests)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| path.extension() == Some(&OsString::from("png")))
-            .collect();
+        let files: Vec<_> = all_blackbox_files();
 
-        for file in files {
-            let img = image::open(&file).unwrap();
-            let output_path: PathBuf = [
-                PathBuf::from("test_output"),
-                PathBuf::from(file.file_name().unwrap()),
-            ]
-            .iter()
-            .collect();
+        for (index_string, directory, file_name) in files {
+            let input_path: PathBuf = [&directory, &file_name].iter().collect();
+            let output_path: PathBuf = ["test_output", &format!("{}-{}", index_string, file_name)]
+                .iter()
+                .collect();
+            let img = image::open(&input_path)
+                .map_err(|e| format!("Could not find: {:?} {:?}", input_path, e))
+                .unwrap();
             let grayscale = image::imageops::colorops::grayscale(&img);
             let thresholded = crate::adaptive_gaussian_threshold(&grayscale, 20., 0);
             let hints = crate::detect_position_marker_hints(&thresholded);
@@ -432,15 +473,21 @@ mod tests {
             }
             for marker in markers {
                 let rect = imageproc::rect::Rect::at(
-                    (marker.center.0 - marker.size / 2.) as i32,
-                    (marker.center.1 - marker.size / 2.) as i32,
+                    f64::round(marker.center.0 - marker.size / 2.) as i32,
+                    f64::round(marker.center.1 - marker.size / 2.) as i32,
                 )
-                .of_size(marker.size as u32, marker.size as u32);
+                .of_size(
+                    f64::round(marker.size) as u32,
+                    f64::round(marker.size) as u32,
+                );
 
                 imageproc::drawing::draw_hollow_rect_mut(&mut image, rect, image::Rgb([0, 255, 0]));
             }
 
-            image.save(&output_path).unwrap();
+            image
+                .save(&output_path)
+                .map_err(|e| format!("Could not write to {:?} {:?}", output_path, e))
+                .unwrap();
         }
     }
 }
