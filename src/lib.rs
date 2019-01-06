@@ -327,7 +327,7 @@ pub struct PositionMarkerHint {
     size: f64,
 }
 
-pub fn detect_position_marker_hints(image: &Image<Luma<u8>>) -> Vec<PositionMarkerHint> {
+fn detect_position_marker_hints(image: &Image<Luma<u8>>) -> Vec<PositionMarkerHint> {
     let mut found: Vec<PositionMarkerHint> = vec![];
 
     for x in 0..image.width() {
@@ -366,13 +366,13 @@ pub fn detect_position_marker_hints(image: &Image<Luma<u8>>) -> Vec<PositionMark
     found
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PositionMarker {
-    center: (f64, f64),
-    size: f64,
+    pub center: (f64, f64),
+    pub size: f64,
 }
 
-pub fn cluster_position_marker_hints(hints: &[PositionMarkerHint]) -> Vec<PositionMarker> {
+fn cluster_position_marker_hints(hints: &[PositionMarkerHint]) -> Vec<PositionMarker> {
     let centers: Vec<_> = hints.iter().map(|h| vec![h.center.0, h.center.1]).collect();
     let classifications = dbscan::cluster(4., 9, &centers);
     let mut clusters: HashMap<usize, Vec<&PositionMarkerHint>> = HashMap::new();
@@ -409,6 +409,13 @@ pub fn cluster_position_marker_hints(hints: &[PositionMarkerHint]) -> Vec<Positi
         .collect();
 
     markers
+}
+
+pub fn detect_position_markers(image: &image::DynamicImage) -> Vec<PositionMarker> {
+    let grayscale = image::imageops::colorops::grayscale(image);
+    let thresholded = adaptive_gaussian_threshold(&grayscale, 20., 0);
+    let hints = detect_position_marker_hints(&thresholded);
+    cluster_position_marker_hints(&hints)
 }
 
 #[cfg(test)]
