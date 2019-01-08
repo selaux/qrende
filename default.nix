@@ -11,4 +11,5 @@ stdenv.mkDerivation {
   name = "qrdese";
 
   BLACKBOX_TESTS = "${allBlackboxTests}";
+  TEST_FONT = "${opensans-ttf}/share/fonts/truetype/OpenSans-Bold.ttf";
 }
